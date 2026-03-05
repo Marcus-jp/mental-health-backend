@@ -1,3 +1,6 @@
+import os
+print("🔑 GROQ_API_KEY present:", bool(os.getenv("GROQ_API_KEY")))
+print("🗄️ DATABASE_URL present:", bool(os.getenv("DATABASE_URL")))
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers.chat_router import router as chat_router
