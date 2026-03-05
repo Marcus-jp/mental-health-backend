@@ -2,13 +2,13 @@
 NLP Service for Mental Health Support 🌿
 - Powered by Groq API
 - Full conversation memory per user (in-memory + database)
-- Local emotion detection
+- Groq-based emotion detection (no PyTorch needed)
 - Crisis detection
 """
 
 import os
+import json
 from groq import Groq
-from transformers import pipeline
 from dotenv import load_dotenv
 from datetime import datetime
 
@@ -47,32 +47,47 @@ def confidence_to_level(emotion: str, confidence: float) -> int:
 
 class NLPService:
     def __init__(self):
-        print("Loading NLP models...")
+        print("Loading NLP service...")
 
         self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
         self.model = "llama-3.1-8b-instant"
 
-        self.emotion_model = pipeline(
-            "text-classification",
-            model="j-hartmann/emotion-english-distilroberta-base",
-            top_k=1,
-            device=-1
-        )
-
         self.user_histories: dict = {}
         self.MAX_HISTORY = 20
 
-        print("Models loaded successfully!")
+        print("NLP service loaded successfully!")
 
     # --------------------------
-    # Emotion Detection
+    # Emotion Detection (via Groq)
     # --------------------------
     def detect_emotion(self, text: str) -> dict:
         try:
-            result = self.emotion_model(text)[0][0]
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "You are an emotion classifier. "
+                            "Respond with ONLY a valid JSON object like: "
+                            "{\"emotion\": \"joy\", \"confidence\": 0.9}. "
+                            "Choose emotion from: joy, sadness, anger, fear, disgust, surprise, neutral. "
+                            "No extra text, no markdown, just the JSON object."
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": f"Classify the emotion in this text: {text}"
+                    }
+                ],
+                max_tokens=50,
+                temperature=0.1,
+            )
+            raw = response.choices[0].message.content.strip()
+            result = json.loads(raw)
             return {
-                "emotion": result["label"].lower(),
-                "confidence": float(result["score"])
+                "emotion": result.get("emotion", "neutral").lower(),
+                "confidence": float(result.get("confidence", 0.5))
             }
         except Exception:
             return {"emotion": "neutral", "confidence": 0.5}
@@ -133,10 +148,6 @@ class NLPService:
     # Load history from DB on first access
     # --------------------------
     def _initialize_user_from_db(self, user_id: str):
-        """
-        On first load, pull existing conversation from DB into memory
-        so Groq has full context even after server restart
-        """
         try:
             from database.database import SessionLocal
             from database.models import Conversation
@@ -148,12 +159,10 @@ class NLPService:
                     .order_by(Conversation.timestamp.asc())
                     .all()
                 )
-                # Rebuild in-memory history from DB
                 history = [{"role": "system", "content": SYSTEM_PROMPT}]
                 for c in convos:
                     history.append({"role": c.role, "content": c.content})
 
-                # Trim if too long
                 if len(history) > self.MAX_HISTORY:
                     history = [history[0]] + history[-self.MAX_HISTORY:]
 
@@ -163,7 +172,6 @@ class NLPService:
                 db.close()
         except Exception as e:
             print(f"❌ Failed to load history from DB: {e}")
-            # Fallback to fresh history
             self.user_histories[user_id] = [
                 {"role": "system", "content": SYSTEM_PROMPT}
             ]
@@ -182,12 +190,10 @@ class NLPService:
     # --------------------------
     def get_chat_response(self, user_message: str, user_id: str = "user123") -> dict:
         try:
-            # Detect emotion
             emotion_result = self.detect_emotion(user_message)
             emotion = emotion_result["emotion"]
             confidence = emotion_result["confidence"]
 
-            # Crisis check
             if self.is_crisis(user_message):
                 crisis_reply = (
                     "I'm really concerned about you right now. "
@@ -196,7 +202,6 @@ class NLPService:
                     "Kenya: 0800 720 990, USA: 988, UK: 116 123. "
                     "I'm here with you. 💙"
                 )
-                # ✅ Save crisis exchange to DB
                 self._save_message_to_db(user_id, "user", user_message)
                 self._save_message_to_db(user_id, "assistant", crisis_reply)
                 self._save_emotion_to_db(user_id, "crisis", 1.0)
@@ -206,22 +211,17 @@ class NLPService:
                     "confidence": 1.0
                 }
 
-            # Initialize from DB if first time this session
             if user_id not in self.user_histories:
                 self._initialize_user_from_db(user_id)
 
             history = self.user_histories[user_id]
-
-            # Add user message to memory
             history.append({"role": "user", "content": user_message})
 
-            # Trim if too long
             if len(history) > self.MAX_HISTORY:
                 system_prompt = history[0]
                 history = [system_prompt] + history[-self.MAX_HISTORY:]
                 self.user_histories[user_id] = history
 
-            # Send to Groq
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=history,
@@ -230,15 +230,10 @@ class NLPService:
             )
 
             bot_reply = response.choices[0].message.content.strip()
-
-            # Add assistant reply to memory
             history.append({"role": "assistant", "content": bot_reply})
 
-            # ✅ Save both turns to DB
             self._save_message_to_db(user_id, "user", user_message)
             self._save_message_to_db(user_id, "assistant", bot_reply)
-
-            # ✅ Save emotion to mood_logs
             self._save_emotion_to_db(user_id, emotion, confidence)
 
             return {
