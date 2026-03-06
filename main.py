@@ -6,6 +6,7 @@ from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from routers.chat_router import router as chat_router
 from database.database import create_tables, SessionLocal
+from sqlalchemy import text  # ✅ PostgreSQL-safe textual SQL
 
 # --------------------------
 # Environment Variable Checks
@@ -37,12 +38,12 @@ def test_groq_api():
         return f"❌ Groq API connection failed: {e}"
 
 # --------------------------
-# Optional: Database connection test
+# Optional: Database connection test (PostgreSQL-safe)
 # --------------------------
 def test_database():
     try:
         db = SessionLocal()
-        result = db.execute("SELECT 1").fetchone()
+        result = db.execute(text("SELECT 1")).fetchone()  # ✅ wrap SQL in text()
         db.close()
         if result:
             return "✅ Database connection successful"

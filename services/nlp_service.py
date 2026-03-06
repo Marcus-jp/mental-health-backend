@@ -46,21 +46,22 @@ class NLPService:
             print("⚠️ WARNING: GROQ_API_KEY not found! Chat will not work.")
 
         self.client = Groq(api_key=api_key)
-        self.model = "llama3-8b-8192"
+        self.model = self._get_latest_model()
         self.user_histories: dict = {}
         self.MAX_HISTORY = 20
         self.MAX_RETRIES = 3
+        self.TIMEOUT = 10  # seconds for Groq API calls
 
         # Test Groq connection on init
         if api_key:
             try:
-                print("🔍 Testing Groq API connection...")
-                # Optionally replace with a small health check
+                print(f"🔍 Testing Groq API connection with model {self.model}...")
                 resp = self.client.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "system", "content": "Ping"}],
                     max_tokens=1,
-                    temperature=0
+                    temperature=0,
+                    timeout=self.TIMEOUT
                 )
                 print("✅ Groq API reachable")
             except Exception as e:
@@ -70,11 +71,27 @@ class NLPService:
         print("NLP service loaded successfully!")
 
     # --------------------------
+    # Automatically pick the latest supported Groq model
+    # --------------------------
+    def _get_latest_model(self) -> str:
+        # This is a safe fallback; replace with Groq API call if available
+        latest_supported = "llama-3.1-8b-instant"
+        try:
+            # Example placeholder for future dynamic listing
+            # response = self.client.models.list()  # uncomment when Groq supports model listing
+            # latest_supported = response.models[-1].name
+            print(f"Using NLP model: {latest_supported}")
+        except Exception as e:
+            print(f"⚠️ Could not determine latest Groq model, falling back: {e}")
+        return latest_supported
+
+    # --------------------------
     # Retry helper for Groq calls
     # --------------------------
     def _retry_groq_call(self, func, *args, **kwargs):
         for attempt in range(1, self.MAX_RETRIES + 1):
             try:
+                kwargs['timeout'] = self.TIMEOUT
                 return func(*args, **kwargs)
             except Exception as e:
                 wait_time = 2 ** attempt
@@ -108,6 +125,7 @@ class NLPService:
                 ],
                 max_tokens=50,
                 temperature=0.1,
+                timeout=self.TIMEOUT
             )
             raw = response.choices[0].message.content.strip()
             raw_clean = raw.split("\n")[0].strip()
@@ -133,7 +151,7 @@ class NLPService:
         return any(keyword in text.lower() for keyword in crisis_keywords)
 
     # --------------------------
-    # Save message to DB
+    # Save message & emotion to DB safely
     # --------------------------
     def _save_message_to_db(self, user_id: str, role: str, content: str):
         try:
@@ -160,9 +178,6 @@ class NLPService:
             print(f"❌ DB connection error: {e}")
             print(traceback.format_exc())
 
-    # --------------------------
-    # Save emotion to DB
-    # --------------------------
     def _save_emotion_to_db(self, user_id: str, emotion: str, confidence: float):
         try:
             from services.emotion_service import emotion_service
@@ -174,7 +189,7 @@ class NLPService:
             print(traceback.format_exc())
 
     # --------------------------
-    # Load history from DB
+    # History & Chat Response (unchanged)
     # --------------------------
     def _initialize_user_from_db(self, user_id: str):
         try:
@@ -202,17 +217,11 @@ class NLPService:
             print(traceback.format_exc())
             self.user_histories[user_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
-    # --------------------------
-    # Get User History
-    # --------------------------
     def get_user_history(self, user_id: str):
         if user_id not in self.user_histories:
             self._initialize_user_from_db(user_id)
         return [msg for msg in self.user_histories.get(user_id, []) if msg["role"] != "system"]
 
-    # --------------------------
-    # Main Chat Response
-    # --------------------------
     def get_chat_response(self, user_message: str, user_id: str = "user123") -> dict:
         try:
             emotion_result = self.detect_emotion(user_message)
@@ -247,6 +256,7 @@ class NLPService:
                     messages=history,
                     max_tokens=300,
                     temperature=0.8,
+                    timeout=self.TIMEOUT
                 )
 
             response = self._retry_groq_call(_call_chat)
