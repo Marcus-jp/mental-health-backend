@@ -4,16 +4,19 @@ NLP Service for Mental Health Support 🌿
 - Full conversation memory per user (in-memory + database)
 - Groq-based emotion detection (no PyTorch needed)
 - Crisis detection
+- Improved reliability with automatic retries
 """
 
 import os
 import json
+import time
+import traceback
 from groq import Groq
 from dotenv import load_dotenv
 from datetime import datetime
 from pathlib import Path
 
-# Load .env from the root of the backend folder explicitly
+# Load .env from backend root
 load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 
 SYSTEM_PROMPT = """
@@ -34,9 +37,6 @@ Guidelines:
 - Respond in the same language as the user
 """
 
-# --------------------------
-# Helper: emotion → 1-5 level
-# --------------------------
 def confidence_to_level(emotion: str, confidence: float) -> int:
     positive = ["joy", "happy", "content", "surprise"]
     negative = ["sadness", "anger", "fear", "disgust", "depressed", "sad"]
@@ -56,18 +56,36 @@ class NLPService:
             print("⚠️ WARNING: GROQ_API_KEY not found! Chat will not work.")
 
         self.client = Groq(api_key=api_key)
-        self.model = "llama-3.1-8b-instant"
-
+        self.model = "llama3-8b-8192"
         self.user_histories: dict = {}
         self.MAX_HISTORY = 20
+        self.MAX_RETRIES = 3
 
         print("NLP service loaded successfully!")
 
     # --------------------------
-    # Emotion Detection (via Groq)
+    # Retry helper for Groq calls
+    # --------------------------
+    def _retry_groq_call(self, func, *args, **kwargs):
+        for attempt in range(1, self.MAX_RETRIES + 1):
+            try:
+                return func(*args, **kwargs)
+            except Exception as e:
+                wait_time = 2 ** attempt
+                print(f"❌ Groq call failed (attempt {attempt}): {e}")
+                print(traceback.format_exc())
+                if attempt < self.MAX_RETRIES:
+                    print(f"⏳ Retrying in {wait_time}s...")
+                    time.sleep(wait_time)
+        # All retries failed
+        print("❌ All Groq retries failed.")
+        return None
+
+    # --------------------------
+    # Emotion Detection
     # --------------------------
     def detect_emotion(self, text: str) -> dict:
-        try:
+        def _call():
             response = self.client.chat.completions.create(
                 model=self.model,
                 messages=[
@@ -81,22 +99,22 @@ class NLPService:
                             "No extra text, no markdown, just the JSON object."
                         )
                     },
-                    {
-                        "role": "user",
-                        "content": f"Classify the emotion in this text: {text}"
-                    }
+                    {"role": "user", "content": f"Classify the emotion in this text: {text}"}
                 ],
                 max_tokens=50,
                 temperature=0.1,
             )
             raw = response.choices[0].message.content.strip()
-            result = json.loads(raw)
+            raw_clean = raw.split("\n")[0].strip()
+            return json.loads(raw_clean)
+
+        result = self._retry_groq_call(_call)
+        if result:
             return {
                 "emotion": result.get("emotion", "neutral").lower(),
                 "confidence": float(result.get("confidence", 0.5))
             }
-        except Exception:
-            return {"emotion": "neutral", "confidence": 0.5}
+        return {"emotion": "neutral", "confidence": 0.5}
 
     # --------------------------
     # Crisis Detection
@@ -141,17 +159,13 @@ class NLPService:
         try:
             from services.emotion_service import emotion_service
             level = confidence_to_level(emotion, confidence)
-            emotion_service.log_emotion(
-                user_id=user_id,
-                emotion=emotion,
-                level=level
-            )
+            emotion_service.log_emotion(user_id=user_id, emotion=emotion, level=level)
             print(f"🎭 Emotion saved: {emotion} → level {level} for {user_id}")
         except Exception as e:
             print(f"❌ Emotion save error: {e}")
 
     # --------------------------
-    # Load history from DB on first access
+    # Load history from DB
     # --------------------------
     def _initialize_user_from_db(self, user_id: str):
         try:
@@ -168,28 +182,23 @@ class NLPService:
                 history = [{"role": "system", "content": SYSTEM_PROMPT}]
                 for c in convos:
                     history.append({"role": c.role, "content": c.content})
-
                 if len(history) > self.MAX_HISTORY:
                     history = [history[0]] + history[-self.MAX_HISTORY:]
-
                 self.user_histories[user_id] = history
                 print(f"📂 Loaded {len(convos)} messages from DB for {user_id}")
             finally:
                 db.close()
         except Exception as e:
             print(f"❌ Failed to load history from DB: {e}")
-            self.user_histories[user_id] = [
-                {"role": "system", "content": SYSTEM_PROMPT}
-            ]
+            self.user_histories[user_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     # --------------------------
-    # Get User History (for frontend)
+    # Get User History
     # --------------------------
     def get_user_history(self, user_id: str):
         if user_id not in self.user_histories:
             self._initialize_user_from_db(user_id)
-        history = self.user_histories.get(user_id, [])
-        return [msg for msg in history if msg["role"] != "system"]
+        return [msg for msg in self.user_histories.get(user_id, []) if msg["role"] != "system"]
 
     # --------------------------
     # Main Chat Response
@@ -211,45 +220,46 @@ class NLPService:
                 self._save_message_to_db(user_id, "user", user_message)
                 self._save_message_to_db(user_id, "assistant", crisis_reply)
                 self._save_emotion_to_db(user_id, "crisis", 1.0)
-                return {
-                    "response": crisis_reply,
-                    "emotion": "crisis",
-                    "confidence": 1.0
-                }
+                return {"response": crisis_reply, "emotion": "crisis", "confidence": 1.0}
 
             if user_id not in self.user_histories:
                 self._initialize_user_from_db(user_id)
 
             history = self.user_histories[user_id]
             history.append({"role": "user", "content": user_message})
-
             if len(history) > self.MAX_HISTORY:
-                system_prompt = history[0]
-                history = [system_prompt] + history[-self.MAX_HISTORY:]
+                history = [history[0]] + history[-self.MAX_HISTORY:]
                 self.user_histories[user_id] = history
 
-            response = self.client.chat.completions.create(
-                model=self.model,
-                messages=history,
-                max_tokens=300,
-                temperature=0.8,
-            )
+            def _call_chat():
+                return self.client.chat.completions.create(
+                    model=self.model,
+                    messages=history,
+                    max_tokens=300,
+                    temperature=0.8,
+                )
 
-            bot_reply = response.choices[0].message.content.strip()
+            response = self._retry_groq_call(_call_chat)
+            if response:
+                bot_reply = response.choices[0].message.content.strip()
+            else:
+                bot_reply = (
+                    "I'm here with you. I'm having a little trouble connecting right now. "
+                    "Would you like to try again?"
+                )
+                emotion = "neutral"
+                confidence = 0.5
+
             history.append({"role": "assistant", "content": bot_reply})
-
             self._save_message_to_db(user_id, "user", user_message)
             self._save_message_to_db(user_id, "assistant", bot_reply)
             self._save_emotion_to_db(user_id, emotion, confidence)
 
-            return {
-                "response": bot_reply,
-                "emotion": emotion,
-                "confidence": confidence
-            }
+            return {"response": bot_reply, "emotion": emotion, "confidence": confidence}
 
         except Exception as e:
-            print(f"❌ Groq error: {e}")
+            print(f"❌ Unexpected error in chat response: {e}")
+            print(traceback.format_exc())
             return {
                 "response": (
                     "I'm here with you. I'm having a little trouble connecting right now. "
