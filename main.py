@@ -16,17 +16,14 @@ app = FastAPI(
 )
 
 # --------------------------
-# CORS Settings (for Flutter/web frontend)
+# CORS Settings
+# Works for: Flutter Web (Chrome), Android, iOS, Postman
 # --------------------------
-origins = [
-    "*",  # allow all for testing; restrict in production
-]
-
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
-    allow_credentials=True,
-    allow_methods=["*"],
+    allow_origins=["*"],        # Allow all origins
+    allow_credentials=False,    # Must be False when allow_origins=["*"]
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["*"],
 )
 
