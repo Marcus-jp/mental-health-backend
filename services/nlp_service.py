@@ -11,8 +11,10 @@ import json
 from groq import Groq
 from dotenv import load_dotenv
 from datetime import datetime
+from pathlib import Path
 
-load_dotenv()
+# Load .env from the root of the backend folder explicitly
+load_dotenv(dotenv_path=Path(__file__).parent.parent / ".env")
 
 SYSTEM_PROMPT = """
 You are Serene, a warm, empathetic, and professional mental health support assistant.
@@ -49,7 +51,11 @@ class NLPService:
     def __init__(self):
         print("Loading NLP service...")
 
-        self.client = Groq(api_key=os.getenv("GROQ_API_KEY"))
+        api_key = os.getenv("GROQ_API_KEY")
+        if not api_key:
+            print("⚠️ WARNING: GROQ_API_KEY not found! Chat will not work.")
+
+        self.client = Groq(api_key=api_key)
         self.model = "llama-3.1-8b-instant"
 
         self.user_histories: dict = {}

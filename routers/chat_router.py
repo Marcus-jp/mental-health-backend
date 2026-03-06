@@ -4,6 +4,7 @@ from services.nlp_service import nlp_service
 from services.emotion_service import emotion_service
 from database.database import SessionLocal
 from database.models import Conversation
+from datetime import datetime
 
 router = APIRouter()
 
@@ -33,12 +34,6 @@ def health_check():
 
 # --------------------------
 # Chat Endpoint
-# ── nlp_service handles everything:
-#    ✅ Groq AI response
-#    ✅ In-memory history (for fast Groq context)
-#    ✅ DB persistence (both messages)
-#    ✅ Emotion detection + logging
-#    So this endpoint stays minimal — no duplicate saves.
 # --------------------------
 @router.post("/chat", response_model=ChatResponse)
 def chat(request: ChatRequest):
@@ -87,15 +82,11 @@ def get_mood_trend(user_id: str = Query(...)):
 
 # --------------------------
 # Chat History Endpoint
-# ── Serves DB history to the history screen.
-#    Also merges any in-memory messages not yet
-#    in DB (e.g. current session before flush).
 # --------------------------
 @router.get("/chat/history")
 def get_chat_history(user_id: str = Query(...)):
     db = SessionLocal()
     try:
-        # Fetch from database
         convos = (
             db.query(Conversation)
             .filter(Conversation.user_id == user_id)
@@ -113,7 +104,6 @@ def get_chat_history(user_id: str = Query(...)):
         print(f"📚 DB history for {user_id}: {len(db_messages)} messages")
 
         # Also check in-memory history for any unsaved messages
-        # (edge case: message in memory but DB commit not yet flushed)
         memory_history = nlp_service.get_user_history(user_id)
         db_contents = {m["content"] for m in db_messages}
 
@@ -135,6 +125,27 @@ def get_chat_history(user_id: str = Query(...)):
     except Exception as e:
         print(f"❌ History error: {e}")
         return {"messages": []}
+    finally:
+        db.close()
+
+# --------------------------
+# Clear Chat History Endpoint
+# --------------------------
+@router.post("/chat/clear")
+def clear_chat_history(user_id: str = Query(...)):
+    db = SessionLocal()
+    try:
+        db.query(Conversation).filter(Conversation.user_id == user_id).delete()
+        db.commit()
+        # Also clear in-memory history
+        if user_id in nlp_service.user_histories:
+            del nlp_service.user_histories[user_id]
+        print(f"🗑️ Cleared history for {user_id}")
+        return {"cleared": True, "user_id": user_id}
+    except Exception as e:
+        db.rollback()
+        print(f"❌ Clear history error: {e}")
+        return {"cleared": False, "error": str(e)}
     finally:
         db.close()
 
