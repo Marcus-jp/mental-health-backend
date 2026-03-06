@@ -1,12 +1,3 @@
-"""
-NLP Service for Mental Health Support 🌿
-- Powered by Groq API
-- Full conversation memory per user (in-memory + database)
-- Groq-based emotion detection (no PyTorch needed)
-- Crisis detection
-- Improved reliability with automatic retries
-"""
-
 import os
 import json
 import time
@@ -46,7 +37,6 @@ def confidence_to_level(emotion: str, confidence: float) -> int:
         return 2 if confidence < 0.8 else 1
     return 3
 
-
 class NLPService:
     def __init__(self):
         print("Loading NLP service...")
@@ -60,6 +50,22 @@ class NLPService:
         self.user_histories: dict = {}
         self.MAX_HISTORY = 20
         self.MAX_RETRIES = 3
+
+        # Test Groq connection on init
+        if api_key:
+            try:
+                print("🔍 Testing Groq API connection...")
+                # Optionally replace with a small health check
+                resp = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "system", "content": "Ping"}],
+                    max_tokens=1,
+                    temperature=0
+                )
+                print("✅ Groq API reachable")
+            except Exception as e:
+                print(f"❌ Groq API test failed: {e}")
+                print(traceback.format_exc())
 
         print("NLP service loaded successfully!")
 
@@ -77,7 +83,6 @@ class NLPService:
                 if attempt < self.MAX_RETRIES:
                     print(f"⏳ Retrying in {wait_time}s...")
                     time.sleep(wait_time)
-        # All retries failed
         print("❌ All Groq retries failed.")
         return None
 
@@ -114,6 +119,7 @@ class NLPService:
                 "emotion": result.get("emotion", "neutral").lower(),
                 "confidence": float(result.get("confidence", 0.5))
             }
+        print("⚠️ Falling back to neutral emotion due to Groq failure")
         return {"emotion": "neutral", "confidence": 0.5}
 
     # --------------------------
@@ -147,10 +153,12 @@ class NLPService:
             except Exception as e:
                 db.rollback()
                 print(f"❌ DB save error: {e}")
+                print(traceback.format_exc())
             finally:
                 db.close()
         except Exception as e:
             print(f"❌ DB connection error: {e}")
+            print(traceback.format_exc())
 
     # --------------------------
     # Save emotion to DB
@@ -163,6 +171,7 @@ class NLPService:
             print(f"🎭 Emotion saved: {emotion} → level {level} for {user_id}")
         except Exception as e:
             print(f"❌ Emotion save error: {e}")
+            print(traceback.format_exc())
 
     # --------------------------
     # Load history from DB
@@ -190,6 +199,7 @@ class NLPService:
                 db.close()
         except Exception as e:
             print(f"❌ Failed to load history from DB: {e}")
+            print(traceback.format_exc())
             self.user_histories[user_id] = [{"role": "system", "content": SYSTEM_PROMPT}]
 
     # --------------------------
@@ -268,7 +278,6 @@ class NLPService:
                 "emotion": "neutral",
                 "confidence": 0.5
             }
-
 
 # Initialize once
 nlp_service = NLPService()
